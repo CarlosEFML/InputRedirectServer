@@ -1,0 +1,220 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <malloc.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <unistd.h>
+
+#include <fcntl.h>
+
+#include <sys/types.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#include <3ds.h>
+
+// first byte
+#define DOWN 0x0080
+#define UP 0x0040
+#define LEFT 0x0020
+#define RIGHT 0x0010
+#define B 0x0002
+#define A 0x0001
+#define START 0x0008
+#define SELECT 0x0004
+
+// second byte
+#define Y 0x0800
+#define X 0x0400
+#define L 0x0200
+#define R 0x0100
+
+#define PORT 4950
+
+#define SOC_ALIGN       0x1000
+//#define SOC_BUFFERSIZE  0x100000
+//#define SOC_BUFFERSIZE  (1024 * 128)
+#define SOC_BUFFERSIZE  (1024 * 1024)
+
+static u32 *SOC_buffer = NULL;
+
+__attribute__((format(printf,1,2)))
+void failExit(const char *fmt, ...);
+
+int recvUDPPack(int sock, struct sockaddr_in *senderaddr, char *pack, int maxSz) {
+    socklen_t len = sizeof(struct sockaddr_in);
+
+//    int n = recvfrom(sock, (void *)pack, 8,
+//                MSG_PEEK, ( struct sockaddr *) senderaddr,
+//                &len);
+//    if (n < 8) return 0;
+
+//    recvfrom(sock, (void *)pack, pack->dataSz + 8,
+//            0, ( struct sockaddr *) senderaddr,
+//            &len);
+
+    int n = recvfrom(sock, (void *)pack, maxSz,
+            0, ( struct sockaddr *) senderaddr,
+            &len);
+
+    if (n>0) {
+//      printf("LEN %d\n", n);
+//      for (int i=0; i<len; i++) printf("%02X ", pack[i]);
+//      printf("\n");
+    }
+
+    if (n >= 2) {
+      int btns = (pack[0] ^ 0XFF) | ((pack[1] ^ 0x0F) << 8);
+      if (btns & UP) printf("UP ");
+      if (btns & DOWN) printf("DOWN ");
+      if (btns & LEFT) printf("LEFT ");
+      if (btns & RIGHT) printf("RIGHT ");
+      if (btns & B) printf("B ");
+      if (btns & A) printf("A ");
+      if (btns & START) printf("START ");
+      if (btns & SELECT) printf("SELECT ");
+      if (btns & Y) printf("Y ");
+      if (btns & X) printf("X ");
+      if (btns & L) printf("L ");
+      if (btns & R) printf("R ");
+    }
+
+    return 0;
+}
+
+int createUDP(uint16_t port) {
+    int sockfd;
+    struct sockaddr_in myaddr;
+
+    // Creating socket file descriptor
+    if ( (sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ) {
+        failExit("socket creation failed");
+    }
+
+    if (port) {
+        memset(&myaddr, 0, sizeof(myaddr));
+
+        myaddr.sin_family    = AF_INET; // IPv4
+        myaddr.sin_addr.s_addr = INADDR_ANY;
+        myaddr.sin_port = htons(port);
+
+        // Bind the socket with the server address
+        if ( bind(sockfd, (const struct sockaddr *)&myaddr,
+            sizeof(myaddr)) < 0 )
+        {
+            close(sockfd);
+            failExit("bind filed");
+        }
+    }
+
+    fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
+    return sockfd;
+}
+
+void initScreen() {
+	// Initialize services
+	gfxInitDefault();
+
+	//Initialize console on top screen. Using NULL as the second argument tells the console library to use the internal console structure as current one
+	consoleInit(GFX_TOP, NULL);
+}
+
+void finishScreen() {
+	gfxExit();
+}
+
+void initSockets() {
+	SOC_buffer = (u32*)memalign(SOC_ALIGN, SOC_BUFFERSIZE);
+
+	if(SOC_buffer == NULL) {
+		failExit("memalign: failed to allocate\n");
+	}
+
+	// Now intialise soc:u service
+	int ret = socInit(SOC_buffer, SOC_BUFFERSIZE);
+	if (ret != 0) {
+		failExit("socInit: 0x%08X\n", (unsigned int)ret);
+	}
+}
+
+void finishSockets() {
+	printf("waiting for socExit...\n");
+	socExit();
+}
+
+void finishSys() {
+	finishSockets();
+	finishScreen();
+}
+
+void initSys() {
+	atexit(finishSys);
+
+	initScreen();
+	initSockets();
+
+//	printf("\x1b[1;1HPress Start to exit.");
+	printf("Press Start to exit.\n");
+}
+
+int main(int argc, char **argv)
+{
+	initSys();
+
+	int sock = createUDP(PORT);
+
+	// Main loop
+	while (aptMainLoop())
+	{
+		//Scan all the inputs. This should be done once for each frame
+		hidScanInput();
+
+		//hidKeysDown returns information about which buttons have been just pressed (and they weren't in the previous frame)
+		u32 kDown = hidKeysDown();
+		//hidKeysHeld returns information about which buttons have are held down in this frame
+		u32 kHeld = hidKeysHeld();
+		//hidKeysUp returns information about which buttons have been just released
+		u32 kUp = hidKeysUp();
+
+		if (kDown & KEY_START) break; // break in order to return to hbmenu
+
+		
+		// Flush and swap framebuffers
+		gfxFlushBuffers();
+		gfxSwapBuffers();
+
+		//Wait for VBlank
+		gspWaitForVBlank();
+
+		struct sockaddr_in otheraddr;
+		char buf[256];
+		recvUDPPack(sock, &otheraddr, buf, 256);
+	}
+
+	// Exit services
+	finishSys();
+
+	return 0;
+}
+
+void failExit(const char *fmt, ...) {
+	va_list ap;
+
+	printf(CONSOLE_RED);
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf(CONSOLE_RESET);
+	printf("\nPress B to exit\n");
+
+	while (aptMainLoop()) {
+		gspWaitForVBlank();
+		hidScanInput();
+
+		u32 kDown = hidKeysDown();
+		if (kDown & KEY_B) exit(0);
+	}
+}
